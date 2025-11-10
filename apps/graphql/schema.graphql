@@ -9,6 +9,7 @@ type Event {
   duration: Int
   endTime: DateTime
   id: ID
+  isRegistered: Boolean
   maxParticipants: Int
   notes: String
   registrationDeadline: DateTime
@@ -32,6 +33,12 @@ input EventFiltersInput {
   status: [EventStatus!]
   tagIds: [String!]
   wellnessDimensionIds: [String!]
+}
+
+type EventRegistrationResult {
+  event: Event
+  message: String
+  success: Boolean
 }
 
 type EventSeries {
@@ -116,7 +123,9 @@ type Location {
 }
 
 type Mutation {
+  cancelEventRegistration(eventId: ID!): EventRegistrationResult
   ping: String
+  registerForEvent(eventId: ID!): EventRegistrationResult
 }
 
 enum ParticipantStatus {

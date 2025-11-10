@@ -1,6 +1,6 @@
 import SchemaBuilder from '@pothos/core';
 import { printSchema } from 'graphql';
-import { eq, and, gte, lte, inArray, like, desc, asc, count } from 'drizzle-orm';
+import { eq, and, gte, lte, inArray, like, desc, asc, count, sql } from 'drizzle-orm';
 import * as dbSchema from '@testwelbi/drizzle';
 import type { Context, User, Role } from '../types';
 
@@ -668,6 +668,12 @@ builder.mutationType({
         }
 
         const eventIdNum = parseInt(eventId);
+        if (isNaN(eventIdNum)) {
+          return {
+            success: false,
+            message: 'Invalid event ID',
+          };
+        }
         
         // Fetch the event
         const event = await ctx.db
@@ -731,36 +737,80 @@ builder.mutationType({
           };
         }
 
-        // Check if event is at capacity
-        if (eventData.maxParticipants) {
-          const participantCount = await ctx.db
-            .select({ count: count() })
-            .from(dbSchema.eventParticipants)
-            .where(
-              and(
-                eq(dbSchema.eventParticipants.eventId, eventIdNum),
-                inArray(dbSchema.eventParticipants.status, ACTIVE_PARTICIPANT_STATUSES)
-              )
-            );
-
-          const currentCount = participantCount[0]?.count || 0;
-          
-          if (currentCount >= eventData.maxParticipants) {
-            return {
-              success: false,
-              message: 'Event is at full capacity',
-            };
-          }
-        }
-
-        // Register the user for the event
-        // Using a transaction-like approach to handle concurrent registrations
+        // Register the user for the event with atomic capacity handling
         try {
+          // Insert registration record first
+          // This will fail if duplicate due to application-level check above
           await ctx.db.insert(dbSchema.eventParticipants).values({
             eventId: eventIdNum,
             userId: ctx.user.id,
             status: 'registered',
             registeredAt: Math.floor(Date.now() / 1000),
+          });
+
+          // Conditionally increment currentParticipants only if under capacity
+          // This prevents race conditions by checking capacity during the update
+          if (eventData.maxParticipants) {
+            await ctx.db
+              .update(dbSchema.events)
+              .set({ 
+                currentParticipants: sql`${dbSchema.events.currentParticipants} + 1`,
+                updatedAt: Math.floor(Date.now() / 1000)
+              })
+              .where(
+                and(
+                  eq(dbSchema.events.id, eventIdNum),
+                  // Only increment if we haven't reached capacity
+                  sql`${dbSchema.events.currentParticipants} < ${eventData.maxParticipants}`
+                )
+              );
+
+            //Verify the update succeeded by checking if count was actually incremented
+            // If we hit capacity, the WHERE clause prevented the update
+            const verifyEvent = await ctx.db
+              .select()
+              .from(dbSchema.events)
+              .where(eq(dbSchema.events.id, eventIdNum))
+              .limit(1);
+
+            // Check if currentParticipants was actually incremented
+            // If it's still at or above maxParticipants, the conditional update failed
+            const currentCount = verifyEvent[0]?.currentParticipants || 0;
+            if (currentCount > eventData.maxParticipants) {
+              // Rollback: Delete the registration we just inserted
+              await ctx.db
+                .delete(dbSchema.eventParticipants)
+                .where(
+                  and(
+                    eq(dbSchema.eventParticipants.eventId, eventIdNum),
+                    eq(dbSchema.eventParticipants.userId, ctx.user.id),
+                    eq(dbSchema.eventParticipants.status, 'registered')
+                  )
+                );
+              
+              return {
+                success: false,
+                message: 'Event is at full capacity',
+              };
+            }
+          } else {
+            // No capacity limit - just increment the counter
+            await ctx.db
+              .update(dbSchema.events)
+              .set({ 
+                currentParticipants: sql`${dbSchema.events.currentParticipants} + 1`,
+                updatedAt: Math.floor(Date.now() / 1000)
+              })
+              .where(eq(dbSchema.events.id, eventIdNum));
+          }
+
+          // Log successful registration for audit trail
+          console.log('Event registration successful:', {
+            eventId: eventIdNum,
+            eventTitle: eventData.title,
+            userId: ctx.user.id,
+            userName: ctx.user.name,
+            timestamp: new Date().toISOString()
           });
 
           // Fetch updated event data
@@ -776,15 +826,15 @@ builder.mutationType({
             event: updatedEvent[0],
           };
         } catch (error: any) {
-          // Handle unique constraint violations (duplicate registration attempts)
-          if (error.message?.includes('UNIQUE constraint failed')) {
-            return {
-              success: false,
-              message: 'You are already registered for this event',
-            };
-          }
+          // Log error with context for debugging
+          console.error('Error registering for event:', {
+            eventId: eventIdNum,
+            userId: ctx.user.id,
+            error: error.message,
+            code: error.code,
+            timestamp: new Date().toISOString()
+          });
           
-          console.error('Error registering for event:', error);
           return {
             success: false,
             message: 'An error occurred while registering for the event',
@@ -809,6 +859,12 @@ builder.mutationType({
         }
 
         const eventIdNum = parseInt(eventId);
+        if (isNaN(eventIdNum)) {
+          return {
+            success: false,
+            message: 'Invalid event ID',
+          };
+        }
 
         // Fetch the event
         const event = await ctx.db
@@ -844,12 +900,31 @@ builder.mutationType({
           };
         }
 
-        // Update registration status to 'cancelled'
+        // Update registration status to 'cancelled' and decrement currentParticipants
         try {
+          // Update registration status
           await ctx.db
             .update(dbSchema.eventParticipants)
             .set({ status: 'cancelled' })
             .where(eq(dbSchema.eventParticipants.id, registration[0].id));
+
+          // Decrement currentParticipants & Ensure it doesn't go below 0
+          await ctx.db
+            .update(dbSchema.events)
+            .set({ 
+              currentParticipants: sql`MAX(0, ${dbSchema.events.currentParticipants} - 1)`,
+              updatedAt: Math.floor(Date.now() / 1000)
+            })
+            .where(eq(dbSchema.events.id, eventIdNum));
+
+          // Log successful cancellation for audit trail
+          console.log('Event registration cancelled:', {
+            eventId: eventIdNum,
+            eventTitle: event[0].title,
+            userId: ctx.user.id,
+            userName: ctx.user.name,
+            timestamp: new Date().toISOString()
+          });
 
           // Fetch updated event data
           const updatedEvent = await ctx.db
@@ -863,8 +938,16 @@ builder.mutationType({
             message: 'Successfully cancelled your registration',
             event: updatedEvent[0],
           };
-        } catch (error) {
-          console.error('Error cancelling registration:', error);
+        } catch (error: any) {
+          // Log error with context for debugging
+          console.error('Error cancelling registration:', {
+            eventId: eventIdNum,
+            userId: ctx.user.id,
+            error: error.message,
+            code: error.code,
+            timestamp: new Date().toISOString()
+          });
+          
           return {
             success: false,
             message: 'An error occurred while cancelling your registration',

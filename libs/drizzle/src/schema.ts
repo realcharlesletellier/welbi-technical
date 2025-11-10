@@ -197,8 +197,4 @@ export const eventParticipants = sqliteTable('event_participants', {
   registeredAt: real('registered_at').default(sql`(unixepoch())`),
   status: text('status').default('registered'), // 'registered', 'attended', 'no_show', 'cancelled'
   notes: text('notes'),
-}, (table) => ({
-  // Unique constraint to prevent duplicate registrations
-  // Note: This allows the same user to register again after cancelling
-  uniqueActiveRegistration: sql`UNIQUE(event_id, user_id, status) WHERE status IN ('registered', 'attended')`,
-})); 
+}); 
