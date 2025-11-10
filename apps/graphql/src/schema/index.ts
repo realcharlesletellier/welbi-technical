@@ -659,7 +659,16 @@ builder.mutationType({
         eventId: t.arg.id({ required: true }),
       },
       resolve: async (_, { eventId }, ctx) => {
-        // Authorization: User must be authenticated
+        // Check CASL permission to create event registrations
+        if (!ctx.ability.can('create', 'EventRegistration')) {
+          return {
+            success: false,
+            message: 'You do not have permission to register for events',
+          };
+        }
+
+        // Ensure user exists (CASL check above guarantees this)
+        // We keep redundancy specifically for TypeScript
         if (!ctx.user) {
           return {
             success: false,
@@ -794,7 +803,7 @@ builder.mutationType({
               };
             }
           } else {
-            // No capacity limit - just increment the counter
+            // No capacity limit -> increment counter
             await ctx.db
               .update(dbSchema.events)
               .set({ 
@@ -850,11 +859,20 @@ builder.mutationType({
         eventId: t.arg.id({ required: true }),
       },
       resolve: async (_, { eventId }, ctx) => {
-        // Authorization: User must be authenticated
+        // Ensure user exists first
         if (!ctx.user) {
           return {
             success: false,
             message: 'You must be logged in to cancel registrations',
+          };
+        }
+
+        // Check CASL permission to delete event registrations
+        const registrationResource = { userId: ctx.user.id.toString() };
+        if (!ctx.ability.can('delete', 'EventRegistration')) {
+          return {
+            success: false,
+            message: 'You do not have permission to cancel registrations',
           };
         }
 
