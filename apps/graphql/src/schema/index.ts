@@ -20,6 +20,9 @@ type EventStatus = 'scheduled' | 'cancelled' | 'completed';
 type RecurrenceType = 'daily' | 'weekly' | 'monthly' | 'yearly';
 type ParticipantStatus = 'registered' | 'attended' | 'no_show' | 'cancelled';
 
+// Active participant statuses (used for counting current participants)
+const ACTIVE_PARTICIPANT_STATUSES: ParticipantStatus[] = ['registered', 'attended'];
+
 // Schema builder
 export const builder = new SchemaBuilder<{
   Context: Context;
@@ -274,14 +277,14 @@ const EventType = builder.objectRef<Event>('Event').implement({
     maxParticipants: t.exposeInt('maxParticipants', { nullable: true }),
     currentParticipants: t.int({ 
       resolve: async (obj, _, ctx) => {
-        // Count participants with 'registered' or 'attended' status
+        // Count participants with active statuses
         const result = await ctx.db
           .select({ count: count() })
           .from(dbSchema.eventParticipants)
           .where(
             and(
               eq(dbSchema.eventParticipants.eventId, obj.id),
-              inArray(dbSchema.eventParticipants.status, ['registered', 'attended'])
+              inArray(dbSchema.eventParticipants.status, ACTIVE_PARTICIPANT_STATUSES)
             )
           );
         
@@ -299,7 +302,7 @@ const EventType = builder.objectRef<Event>('Event').implement({
           .where(
             and(
               eq(dbSchema.eventParticipants.eventId, obj.id),
-              inArray(dbSchema.eventParticipants.status, ['registered', 'attended'])
+              inArray(dbSchema.eventParticipants.status, ACTIVE_PARTICIPANT_STATUSES)
             )
           );
         
@@ -316,6 +319,26 @@ const EventType = builder.objectRef<Event>('Event').implement({
     }),
     status: t.exposeString('status'),
     notes: t.exposeString('notes', { nullable: true }),
+    // Check if current user is registered for this event
+    isRegistered: t.boolean({
+      resolve: async (obj, _, ctx) => {
+        if (!ctx.user) return false;
+        
+        const registration = await ctx.db
+          .select()
+          .from(dbSchema.eventParticipants)
+          .where(
+            and(
+              eq(dbSchema.eventParticipants.eventId, obj.id),
+              eq(dbSchema.eventParticipants.userId, ctx.user.id),
+              inArray(dbSchema.eventParticipants.status, ACTIVE_PARTICIPANT_STATUSES)
+            )
+          )
+          .limit(1);
+        
+        return registration.length > 0;
+      }
+    }),
     createdAt: t.field({ 
       type: 'DateTime', 
       resolve: (obj) => timestampToDate(obj.createdAt)?.toISOString() || new Date().toISOString()
@@ -357,6 +380,25 @@ const HealthCheckType = builder.objectRef<HealthCheck>('HealthCheck').implement(
       type: UserType,
       nullable: true,
       resolve: (obj) => obj.currentUser,
+    }),
+  }),
+});
+
+// Event Registration Result type
+interface EventRegistrationResult {
+  success: boolean;
+  message: string;
+  event?: Event;
+}
+
+const EventRegistrationResultType = builder.objectRef<EventRegistrationResult>('EventRegistrationResult').implement({
+  fields: (t) => ({
+    success: t.exposeBoolean('success'),
+    message: t.exposeString('message'),
+    event: t.field({
+      type: EventType,
+      nullable: true,
+      resolve: (obj) => obj.event || null,
     }),
   }),
 });
@@ -603,11 +645,232 @@ builder.queryType({
   }),
 });
 
-// Mutation type with basic field
+// Mutation type with event registration mutations
 builder.mutationType({
   fields: (t) => ({
     ping: t.string({
       resolve: () => 'pong',
+    }),
+
+    // Register for an event
+    registerForEvent: t.field({
+      type: EventRegistrationResultType,
+      args: {
+        eventId: t.arg.id({ required: true }),
+      },
+      resolve: async (_, { eventId }, ctx) => {
+        // Authorization: User must be authenticated
+        if (!ctx.user) {
+          return {
+            success: false,
+            message: 'You must be logged in to register for events',
+          };
+        }
+
+        const eventIdNum = parseInt(eventId);
+        
+        // Fetch the event
+        const event = await ctx.db
+          .select()
+          .from(dbSchema.events)
+          .where(eq(dbSchema.events.id, eventIdNum))
+          .limit(1);
+
+        if (!event.length) {
+          return {
+            success: false,
+            message: 'Event not found',
+          };
+        }
+
+        const eventData = event[0];
+
+        // Check if event is cancelled or completed
+        if (eventData.status === 'cancelled') {
+          return {
+            success: false,
+            message: 'Cannot register for a cancelled event',
+          };
+        }
+
+        if (eventData.status === 'completed') {
+          return {
+            success: false,
+            message: 'Cannot register for a completed event',
+          };
+        }
+
+        // Check if registration deadline has passed
+        if (eventData.registrationDeadline) {
+          const deadline = new Date(eventData.registrationDeadline * 1000);
+          if (deadline < new Date()) {
+            return {
+              success: false,
+              message: 'Registration deadline has passed',
+            };
+          }
+        }
+
+        // Check if user is already registered
+        const existingRegistration = await ctx.db
+          .select()
+          .from(dbSchema.eventParticipants)
+          .where(
+            and(
+              eq(dbSchema.eventParticipants.eventId, eventIdNum),
+              eq(dbSchema.eventParticipants.userId, ctx.user.id),
+              inArray(dbSchema.eventParticipants.status, ACTIVE_PARTICIPANT_STATUSES)
+            )
+          )
+          .limit(1);
+
+        if (existingRegistration.length > 0) {
+          return {
+            success: false,
+            message: 'You are already registered for this event',
+          };
+        }
+
+        // Check if event is at capacity
+        if (eventData.maxParticipants) {
+          const participantCount = await ctx.db
+            .select({ count: count() })
+            .from(dbSchema.eventParticipants)
+            .where(
+              and(
+                eq(dbSchema.eventParticipants.eventId, eventIdNum),
+                inArray(dbSchema.eventParticipants.status, ACTIVE_PARTICIPANT_STATUSES)
+              )
+            );
+
+          const currentCount = participantCount[0]?.count || 0;
+          
+          if (currentCount >= eventData.maxParticipants) {
+            return {
+              success: false,
+              message: 'Event is at full capacity',
+            };
+          }
+        }
+
+        // Register the user for the event
+        // Using a transaction-like approach to handle concurrent registrations
+        try {
+          await ctx.db.insert(dbSchema.eventParticipants).values({
+            eventId: eventIdNum,
+            userId: ctx.user.id,
+            status: 'registered',
+            registeredAt: Math.floor(Date.now() / 1000),
+          });
+
+          // Fetch updated event data
+          const updatedEvent = await ctx.db
+            .select()
+            .from(dbSchema.events)
+            .where(eq(dbSchema.events.id, eventIdNum))
+            .limit(1);
+
+          return {
+            success: true,
+            message: 'Successfully registered for the event',
+            event: updatedEvent[0],
+          };
+        } catch (error: any) {
+          // Handle unique constraint violations (duplicate registration attempts)
+          if (error.message?.includes('UNIQUE constraint failed')) {
+            return {
+              success: false,
+              message: 'You are already registered for this event',
+            };
+          }
+          
+          console.error('Error registering for event:', error);
+          return {
+            success: false,
+            message: 'An error occurred while registering for the event',
+          };
+        }
+      },
+    }),
+
+    // Cancel event registration
+    cancelEventRegistration: t.field({
+      type: EventRegistrationResultType,
+      args: {
+        eventId: t.arg.id({ required: true }),
+      },
+      resolve: async (_, { eventId }, ctx) => {
+        // Authorization: User must be authenticated
+        if (!ctx.user) {
+          return {
+            success: false,
+            message: 'You must be logged in to cancel registrations',
+          };
+        }
+
+        const eventIdNum = parseInt(eventId);
+
+        // Fetch the event
+        const event = await ctx.db
+          .select()
+          .from(dbSchema.events)
+          .where(eq(dbSchema.events.id, eventIdNum))
+          .limit(1);
+
+        if (!event.length) {
+          return {
+            success: false,
+            message: 'Event not found',
+          };
+        }
+
+        // Find user's registration
+        const registration = await ctx.db
+          .select()
+          .from(dbSchema.eventParticipants)
+          .where(
+            and(
+              eq(dbSchema.eventParticipants.eventId, eventIdNum),
+              eq(dbSchema.eventParticipants.userId, ctx.user.id),
+              inArray(dbSchema.eventParticipants.status, ACTIVE_PARTICIPANT_STATUSES)
+            )
+          )
+          .limit(1);
+
+        if (!registration.length) {
+          return {
+            success: false,
+            message: 'You are not registered for this event',
+          };
+        }
+
+        // Update registration status to 'cancelled'
+        try {
+          await ctx.db
+            .update(dbSchema.eventParticipants)
+            .set({ status: 'cancelled' })
+            .where(eq(dbSchema.eventParticipants.id, registration[0].id));
+
+          // Fetch updated event data
+          const updatedEvent = await ctx.db
+            .select()
+            .from(dbSchema.events)
+            .where(eq(dbSchema.events.id, eventIdNum))
+            .limit(1);
+
+          return {
+            success: true,
+            message: 'Successfully cancelled your registration',
+            event: updatedEvent[0],
+          };
+        } catch (error) {
+          console.error('Error cancelling registration:', error);
+          return {
+            success: false,
+            message: 'An error occurred while cancelling your registration',
+          };
+        }
+      },
     }),
   }),
 });
