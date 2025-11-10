@@ -33,6 +33,9 @@ importers:
       '@testwelbi/query-client':
         specifier: workspace:*
         version: link:../../libs/query-client
+      '@testwelbi/time':
+        specifier: workspace:*
+        version: link:../../libs/time
       '@testwelbi/types':
         specifier: workspace:*
         version: link:../../libs/types
@@ -115,6 +118,9 @@ importers:
       '@testwelbi/permissions':
         specifier: workspace:*
         version: link:../../libs/permissions
+      '@testwelbi/time':
+        specifier: workspace:*
+        version: link:../../libs/time
       '@testwelbi/types':
         specifier: workspace:*
         version: link:../../libs/types

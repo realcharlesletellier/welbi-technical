@@ -20,7 +20,8 @@
     "@graphql-typed-document-node/core": "latest",
     "@testwelbi/ui": "workspace:*",
     "@testwelbi/types": "workspace:*",
-    "@testwelbi/query-client": "workspace:*"
+    "@testwelbi/query-client": "workspace:*",
+    "@testwelbi/time": "workspace:*"
   },
   "devDependencies": {
     "@types/react": "latest",

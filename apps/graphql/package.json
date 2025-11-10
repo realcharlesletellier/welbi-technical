@@ -33,7 +33,8 @@
     "@testwelbi/types": "workspace:*",
     "@testwelbi/permissions": "workspace:*",
     "@testwelbi/drizzle": "workspace:*",
-    "@testwelbi/env-parser": "workspace:*"
+    "@testwelbi/env-parser": "workspace:*",
+    "@testwelbi/time": "workspace:*"
   },
   "devDependencies": {
     "typescript": "latest",
