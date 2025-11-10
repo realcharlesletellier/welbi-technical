@@ -3,6 +3,7 @@ import { printSchema } from 'graphql';
 import { eq, and, gte, lte, inArray, like, desc, asc, count, sql } from 'drizzle-orm';
 import * as dbSchema from '@testwelbi/drizzle';
 import type { Context, User, Role } from '../types';
+import { isDateBefore, now, toDate } from '@testwelbi/time';
 
 // Drizzle inferred types
 type WellnessDimension = typeof dbSchema.wellnessDimensions.$inferSelect;
@@ -717,8 +718,8 @@ builder.mutationType({
 
         // Check if registration deadline has passed
         if (eventData.registrationDeadline) {
-          const deadline = new Date(eventData.registrationDeadline * 1000);
-          if (deadline < new Date()) {
+          const deadline = toDate(eventData.registrationDeadline * 1000);
+          if (isDateBefore(deadline, now())) {
             return {
               success: false,
               message: 'Registration deadline has passed',

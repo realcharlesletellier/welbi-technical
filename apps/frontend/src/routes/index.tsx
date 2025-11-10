@@ -1,6 +1,6 @@
 import { createFileRoute } from '@tanstack/react-router'
 import { useQuery } from '@tanstack/react-query'
-import { Card, Box, Typography, CardContent, Calendar, Grid, GridItem } from '@testwelbi/ui'
+import { Card, Box, Typography, CardContent, Calendar, Grid, GridItem, StatusBadge, Flex, Spacer } from '@testwelbi/ui'
 import type { CalendarEvent } from '@testwelbi/ui'
 import { graphql } from '../graphql'
 import { execute } from '../graphql/execute'
@@ -38,6 +38,8 @@ const EventsQuery = graphql(`
       maxParticipants
       registrationRequired
       status
+      isRegistered
+      availableSpots
     }
   }
 `)
@@ -341,9 +343,17 @@ function HomePage() {
                         e.currentTarget.style.boxShadow = 'none'
                       }}
                     >
-                      <Typography $variant="body1" style={{ fontWeight: 'bold', marginBottom: '4px' }}>
-                        {event.title}
-                      </Typography>
+                      <Flex $justify="between" $align="start">
+                        <Typography $variant="body1" style={{ fontWeight: 'bold', marginBottom: '4px', flex: 1 }}>
+                          {event.title}
+                        </Typography>
+                        {event.isRegistered && (
+                          <StatusBadge $status="scheduled" style={{ fontSize: '10px', padding: '2px 6px', backgroundColor: '#16a34a', color: 'white' }}>
+                            ✓ Registered
+                          </StatusBadge>
+                        )}
+                      </Flex>
+                      <Spacer $size="xs" />
                       <Typography $variant="body2" style={{ marginBottom: '4px' }}>
                         {new Date(event.startTime).toLocaleDateString()} at {new Date(event.startTime).toLocaleTimeString()}
                       </Typography>
@@ -353,6 +363,18 @@ function HomePage() {
                       {event.currentParticipants !== null && (
                         <Typography $variant="body2">
                           Participants: {event.currentParticipants}{event.maxParticipants && `/${event.maxParticipants}`}
+                        </Typography>
+                      )}
+                      {event.registrationRequired && event.availableSpots !== null && event.availableSpots !== undefined && (
+                        <Typography $variant="body2" style={{ 
+                          color: event.availableSpots > 0 ? '#16a34a' : '#dc2626',
+                          fontWeight: 'bold',
+                          marginTop: '4px'
+                        }}>
+                          {event.availableSpots > 0 
+                            ? `${event.availableSpots} spots available` 
+                            : 'Fully booked'
+                          }
                         </Typography>
                       )}
                     </Box>
