@@ -192,8 +192,8 @@ export const eventFacilitators = sqliteTable('event_facilitators', {
 // Event participants (residents)
 export const eventParticipants = sqliteTable('event_participants', {
   id: integer('id').primaryKey({ autoIncrement: true }),
-  eventId: integer('event_id').references(() => events.id),
-  userId: integer('user_id').references(() => users.id),
+  eventId: integer('event_id').references(() => events.id).notNull(),
+  userId: integer('user_id').references(() => users.id).notNull(),
   registeredAt: real('registered_at').default(sql`(unixepoch())`),
   status: text('status').default('registered'), // 'registered', 'attended', 'no_show', 'cancelled'
   notes: text('notes'),

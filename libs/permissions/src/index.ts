@@ -5,7 +5,7 @@ import type { User, Role, Permission } from '@testwelbi/types';
 export type Action = 'manage' | 'create' | 'read' | 'update' | 'delete';
 
 // Define the possible subjects
-export type Subject = 'User' | 'Post' | 'Comment' | 'Setting' | 'all';
+export type Subject = 'User' | 'Post' | 'Comment' | 'Setting' | 'Event' | 'EventRegistration' | 'all';
 
 // Ability type
 export type AppAbility = ReturnType<typeof createMongoAbility>;
@@ -65,6 +65,10 @@ export function createAbilityForUser(user: User, roles: Role[] = []): AppAbility
     can('delete', 'Comment', { userId: user.id });
     can('read', 'User', { id: user.id });
     can('update', 'User', { id: user.id });
+    // Event permissions - only residents (USER role) can register for events
+    can('read', 'Event');
+    can('create', 'EventRegistration');
+    can('delete', 'EventRegistration', { userId: user.id });
   }
 
   // Guest permissions (very limited)

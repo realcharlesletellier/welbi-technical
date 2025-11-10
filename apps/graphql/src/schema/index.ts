@@ -1,6 +1,6 @@
 import SchemaBuilder from '@pothos/core';
 import { printSchema } from 'graphql';
-import { eq, and, gte, lte, inArray, like, desc, asc, count } from 'drizzle-orm';
+import { eq, and, gte, lte, inArray, like, desc, asc, count, sql } from 'drizzle-orm';
 import * as dbSchema from '@testwelbi/drizzle';
 import type { Context, User, Role } from '../types';
 
@@ -19,6 +19,9 @@ type Event = typeof dbSchema.events.$inferSelect;
 type EventStatus = 'scheduled' | 'cancelled' | 'completed';
 type RecurrenceType = 'daily' | 'weekly' | 'monthly' | 'yearly';
 type ParticipantStatus = 'registered' | 'attended' | 'no_show' | 'cancelled';
+
+// Active participant statuses (used for counting current participants)
+const ACTIVE_PARTICIPANT_STATUSES: ParticipantStatus[] = ['registered', 'attended'];
 
 // Schema builder
 export const builder = new SchemaBuilder<{
@@ -274,14 +277,14 @@ const EventType = builder.objectRef<Event>('Event').implement({
     maxParticipants: t.exposeInt('maxParticipants', { nullable: true }),
     currentParticipants: t.int({ 
       resolve: async (obj, _, ctx) => {
-        // Count participants with 'registered' or 'attended' status
+        // Count participants with active statuses
         const result = await ctx.db
           .select({ count: count() })
           .from(dbSchema.eventParticipants)
           .where(
             and(
               eq(dbSchema.eventParticipants.eventId, obj.id),
-              inArray(dbSchema.eventParticipants.status, ['registered', 'attended'])
+              inArray(dbSchema.eventParticipants.status, ACTIVE_PARTICIPANT_STATUSES)
             )
           );
         
@@ -299,7 +302,7 @@ const EventType = builder.objectRef<Event>('Event').implement({
           .where(
             and(
               eq(dbSchema.eventParticipants.eventId, obj.id),
-              inArray(dbSchema.eventParticipants.status, ['registered', 'attended'])
+              inArray(dbSchema.eventParticipants.status, ACTIVE_PARTICIPANT_STATUSES)
             )
           );
         
@@ -316,6 +319,26 @@ const EventType = builder.objectRef<Event>('Event').implement({
     }),
     status: t.exposeString('status'),
     notes: t.exposeString('notes', { nullable: true }),
+    // Check if current user is registered for this event
+    isRegistered: t.boolean({
+      resolve: async (obj, _, ctx) => {
+        if (!ctx.user) return false;
+        
+        const registration = await ctx.db
+          .select()
+          .from(dbSchema.eventParticipants)
+          .where(
+            and(
+              eq(dbSchema.eventParticipants.eventId, obj.id),
+              eq(dbSchema.eventParticipants.userId, ctx.user.id),
+              inArray(dbSchema.eventParticipants.status, ACTIVE_PARTICIPANT_STATUSES)
+            )
+          )
+          .limit(1);
+        
+        return registration.length > 0;
+      }
+    }),
     createdAt: t.field({ 
       type: 'DateTime', 
       resolve: (obj) => timestampToDate(obj.createdAt)?.toISOString() || new Date().toISOString()
@@ -357,6 +380,25 @@ const HealthCheckType = builder.objectRef<HealthCheck>('HealthCheck').implement(
       type: UserType,
       nullable: true,
       resolve: (obj) => obj.currentUser,
+    }),
+  }),
+});
+
+// Event Registration Result type
+interface EventRegistrationResult {
+  success: boolean;
+  message: string;
+  event?: Event;
+}
+
+const EventRegistrationResultType = builder.objectRef<EventRegistrationResult>('EventRegistrationResult').implement({
+  fields: (t) => ({
+    success: t.exposeBoolean('success'),
+    message: t.exposeString('message'),
+    event: t.field({
+      type: EventType,
+      nullable: true,
+      resolve: (obj) => obj.event || null,
     }),
   }),
 });
@@ -603,11 +645,333 @@ builder.queryType({
   }),
 });
 
-// Mutation type with basic field
+// Mutation type with event registration mutations
 builder.mutationType({
   fields: (t) => ({
     ping: t.string({
       resolve: () => 'pong',
+    }),
+
+    // Register for an event
+    registerForEvent: t.field({
+      type: EventRegistrationResultType,
+      args: {
+        eventId: t.arg.id({ required: true }),
+      },
+      resolve: async (_, { eventId }, ctx) => {
+        // Check CASL permission to create event registrations
+        if (!ctx.ability.can('create', 'EventRegistration')) {
+          return {
+            success: false,
+            message: 'You do not have permission to register for events',
+          };
+        }
+
+        // Ensure user exists (CASL check above guarantees this)
+        // We keep redundancy specifically for TypeScript
+        if (!ctx.user) {
+          return {
+            success: false,
+            message: 'You must be logged in to register for events',
+          };
+        }
+
+        const eventIdNum = parseInt(eventId);
+        if (isNaN(eventIdNum)) {
+          return {
+            success: false,
+            message: 'Invalid event ID',
+          };
+        }
+        
+        // Fetch the event
+        const event = await ctx.db
+          .select()
+          .from(dbSchema.events)
+          .where(eq(dbSchema.events.id, eventIdNum))
+          .limit(1);
+
+        if (!event.length) {
+          return {
+            success: false,
+            message: 'Event not found',
+          };
+        }
+
+        const eventData = event[0];
+
+        // Check if event is cancelled or completed
+        if (eventData.status === 'cancelled') {
+          return {
+            success: false,
+            message: 'Cannot register for a cancelled event',
+          };
+        }
+
+        if (eventData.status === 'completed') {
+          return {
+            success: false,
+            message: 'Cannot register for a completed event',
+          };
+        }
+
+        // Check if registration deadline has passed
+        if (eventData.registrationDeadline) {
+          const deadline = new Date(eventData.registrationDeadline * 1000);
+          if (deadline < new Date()) {
+            return {
+              success: false,
+              message: 'Registration deadline has passed',
+            };
+          }
+        }
+
+        // Check if user is already registered
+        const existingRegistration = await ctx.db
+          .select()
+          .from(dbSchema.eventParticipants)
+          .where(
+            and(
+              eq(dbSchema.eventParticipants.eventId, eventIdNum),
+              eq(dbSchema.eventParticipants.userId, ctx.user.id),
+              inArray(dbSchema.eventParticipants.status, ACTIVE_PARTICIPANT_STATUSES)
+            )
+          )
+          .limit(1);
+
+        if (existingRegistration.length > 0) {
+          return {
+            success: false,
+            message: 'You are already registered for this event',
+          };
+        }
+
+        // Register the user for the event with atomic capacity handling
+        try {
+          // Insert registration record first
+          // This will fail if duplicate due to application-level check above
+          await ctx.db.insert(dbSchema.eventParticipants).values({
+            eventId: eventIdNum,
+            userId: ctx.user.id,
+            status: 'registered',
+            registeredAt: Math.floor(Date.now() / 1000),
+          });
+
+          // Conditionally increment currentParticipants only if under capacity
+          // This prevents race conditions by checking capacity during the update
+          if (eventData.maxParticipants) {
+            await ctx.db
+              .update(dbSchema.events)
+              .set({ 
+                currentParticipants: sql`${dbSchema.events.currentParticipants} + 1`,
+                updatedAt: Math.floor(Date.now() / 1000)
+              })
+              .where(
+                and(
+                  eq(dbSchema.events.id, eventIdNum),
+                  // Only increment if we haven't reached capacity
+                  sql`${dbSchema.events.currentParticipants} < ${eventData.maxParticipants}`
+                )
+              );
+
+            //Verify the update succeeded by checking if count was actually incremented
+            // If we hit capacity, the WHERE clause prevented the update
+            const verifyEvent = await ctx.db
+              .select()
+              .from(dbSchema.events)
+              .where(eq(dbSchema.events.id, eventIdNum))
+              .limit(1);
+
+            // Check if currentParticipants was actually incremented
+            // If it's still at or above maxParticipants, the conditional update failed
+            const currentCount = verifyEvent[0]?.currentParticipants || 0;
+            if (currentCount > eventData.maxParticipants) {
+              // Rollback: Delete the registration we just inserted
+              await ctx.db
+                .delete(dbSchema.eventParticipants)
+                .where(
+                  and(
+                    eq(dbSchema.eventParticipants.eventId, eventIdNum),
+                    eq(dbSchema.eventParticipants.userId, ctx.user.id),
+                    eq(dbSchema.eventParticipants.status, 'registered')
+                  )
+                );
+              
+              return {
+                success: false,
+                message: 'Event is at full capacity',
+              };
+            }
+          } else {
+            // No capacity limit -> increment counter
+            await ctx.db
+              .update(dbSchema.events)
+              .set({ 
+                currentParticipants: sql`${dbSchema.events.currentParticipants} + 1`,
+                updatedAt: Math.floor(Date.now() / 1000)
+              })
+              .where(eq(dbSchema.events.id, eventIdNum));
+          }
+
+          // Log successful registration for audit trail
+          console.log('Event registration successful:', {
+            eventId: eventIdNum,
+            eventTitle: eventData.title,
+            userId: ctx.user.id,
+            userName: ctx.user.name,
+            timestamp: new Date().toISOString()
+          });
+
+          // Fetch updated event data
+          const updatedEvent = await ctx.db
+            .select()
+            .from(dbSchema.events)
+            .where(eq(dbSchema.events.id, eventIdNum))
+            .limit(1);
+
+          return {
+            success: true,
+            message: 'Successfully registered for the event',
+            event: updatedEvent[0],
+          };
+        } catch (error: any) {
+          // Log error with context for debugging
+          console.error('Error registering for event:', {
+            eventId: eventIdNum,
+            userId: ctx.user.id,
+            error: error.message,
+            code: error.code,
+            timestamp: new Date().toISOString()
+          });
+          
+          return {
+            success: false,
+            message: 'An error occurred while registering for the event',
+          };
+        }
+      },
+    }),
+
+    // Cancel event registration
+    cancelEventRegistration: t.field({
+      type: EventRegistrationResultType,
+      args: {
+        eventId: t.arg.id({ required: true }),
+      },
+      resolve: async (_, { eventId }, ctx) => {
+        // Ensure user exists first
+        if (!ctx.user) {
+          return {
+            success: false,
+            message: 'You must be logged in to cancel registrations',
+          };
+        }
+
+        // Check CASL permission to delete event registrations
+        const registrationResource = { userId: ctx.user.id.toString() };
+        if (!ctx.ability.can('delete', 'EventRegistration')) {
+          return {
+            success: false,
+            message: 'You do not have permission to cancel registrations',
+          };
+        }
+
+        const eventIdNum = parseInt(eventId);
+        if (isNaN(eventIdNum)) {
+          return {
+            success: false,
+            message: 'Invalid event ID',
+          };
+        }
+
+        // Fetch the event
+        const event = await ctx.db
+          .select()
+          .from(dbSchema.events)
+          .where(eq(dbSchema.events.id, eventIdNum))
+          .limit(1);
+
+        if (!event.length) {
+          return {
+            success: false,
+            message: 'Event not found',
+          };
+        }
+
+        // Find user's registration
+        const registration = await ctx.db
+          .select()
+          .from(dbSchema.eventParticipants)
+          .where(
+            and(
+              eq(dbSchema.eventParticipants.eventId, eventIdNum),
+              eq(dbSchema.eventParticipants.userId, ctx.user.id),
+              inArray(dbSchema.eventParticipants.status, ACTIVE_PARTICIPANT_STATUSES)
+            )
+          )
+          .limit(1);
+
+        if (!registration.length) {
+          return {
+            success: false,
+            message: 'You are not registered for this event',
+          };
+        }
+
+        // Update registration status to 'cancelled' and decrement currentParticipants
+        try {
+          // Update registration status
+          await ctx.db
+            .update(dbSchema.eventParticipants)
+            .set({ status: 'cancelled' })
+            .where(eq(dbSchema.eventParticipants.id, registration[0].id));
+
+          // Decrement currentParticipants & Ensure it doesn't go below 0
+          await ctx.db
+            .update(dbSchema.events)
+            .set({ 
+              currentParticipants: sql`MAX(0, ${dbSchema.events.currentParticipants} - 1)`,
+              updatedAt: Math.floor(Date.now() / 1000)
+            })
+            .where(eq(dbSchema.events.id, eventIdNum));
+
+          // Log successful cancellation for audit trail
+          console.log('Event registration cancelled:', {
+            eventId: eventIdNum,
+            eventTitle: event[0].title,
+            userId: ctx.user.id,
+            userName: ctx.user.name,
+            timestamp: new Date().toISOString()
+          });
+
+          // Fetch updated event data
+          const updatedEvent = await ctx.db
+            .select()
+            .from(dbSchema.events)
+            .where(eq(dbSchema.events.id, eventIdNum))
+            .limit(1);
+
+          return {
+            success: true,
+            message: 'Successfully cancelled your registration',
+            event: updatedEvent[0],
+          };
+        } catch (error: any) {
+          // Log error with context for debugging
+          console.error('Error cancelling registration:', {
+            eventId: eventIdNum,
+            userId: ctx.user.id,
+            error: error.message,
+            code: error.code,
+            timestamp: new Date().toISOString()
+          });
+          
+          return {
+            success: false,
+            message: 'An error occurred while cancelling your registration',
+          };
+        }
+      },
     }),
   }),
 });
