@@ -45,6 +45,8 @@ export function createAbilityForUser(user: User, roles: Role[] = []): AppAbility
     can('manage', 'Post');
     can('manage', 'Comment');
     can('read', 'Setting');
+    can('manage', 'Event');
+    can('manage', 'EventRegistration');
   }
 
   // Manager permissions
@@ -55,6 +57,8 @@ export function createAbilityForUser(user: User, roles: Role[] = []): AppAbility
     can('delete', 'Post', { userId: user.id });
     can('read', 'User');
     can('update', 'User', { id: user.id });
+    can('manage', 'Event');
+    can('manage', 'EventRegistration');
   }
 
   // Regular user permissions
@@ -65,7 +69,7 @@ export function createAbilityForUser(user: User, roles: Role[] = []): AppAbility
     can('delete', 'Comment', { userId: user.id });
     can('read', 'User', { id: user.id });
     can('update', 'User', { id: user.id });
-    // Event permissions - only residents (USER role) can register for events
+    // Users (residents) can register for events
     can('read', 'Event');
     can('create', 'EventRegistration');
     can('delete', 'EventRegistration', { userId: user.id });

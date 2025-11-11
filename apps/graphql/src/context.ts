@@ -21,8 +21,18 @@ export async function createContext({ req, res }: { req: AuthenticatedRequest; r
       });
       if (devUser) {
         req.user = devUser;
-        // Optionally load roles in development too
-        // req.roles = await db.query.roles.findMany(...);
+        // In development, assign roles based on user ID
+        // User ID 1: admin, Others: regular users (residents)
+        const roleName = userId === 1 ? 'admin' : 'user';
+        const roleId = userId === 1 ? 1 : 3;
+        
+        req.roles = [{
+          id: roleId,
+          name: roleName,
+          description: `${roleName} role`,
+          isActive: true,
+          createdAt: Date.now() / 1000,
+        }];
       }
     }
   }
