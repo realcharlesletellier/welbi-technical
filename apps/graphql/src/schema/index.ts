@@ -691,7 +691,7 @@ builder.mutationType({
         if (!ctx.ability.can('create', 'EventRegistration')) {
           return {
             success: false,
-            message: 'You do not have permission to register for events',
+            message: 'You must be logged in to register for events',
           };
         }
 
