@@ -3,7 +3,8 @@ import { printSchema } from 'graphql';
 import { eq, and, gte, lte, inArray, like, desc, asc, count, sql } from 'drizzle-orm';
 import * as dbSchema from '@testwelbi/drizzle';
 import type { Context, User, Role } from '../types';
-import { isDateBefore, now, toDate } from '@testwelbi/time';
+import { formatDate, isDateBefore, isDateAfter, now, toDate } from '@testwelbi/time';
+import { z } from 'zod';
 
 // Drizzle inferred types
 type WellnessDimension = typeof dbSchema.wellnessDimensions.$inferSelect;
@@ -23,6 +24,21 @@ type ParticipantStatus = 'registered' | 'attended' | 'no_show' | 'cancelled';
 
 // Active participant statuses (used for counting current participants)
 const ACTIVE_PARTICIPANT_STATUSES: ParticipantStatus[] = ['registered', 'attended'];
+
+// Zod validation schemas
+const EventIdSchema = z.string()
+  .min(1, 'Event ID is required')
+  .regex(/^\d+$/, 'Event ID must be a valid number')
+  .transform(val => parseInt(val, 10))
+  .refine(val => !isNaN(val) && val > 0, 'Event ID must be a positive number');
+
+const RegisterForEventArgsSchema = z.object({
+  eventId: EventIdSchema,
+});
+
+const CancelEventRegistrationArgsSchema = z.object({
+  eventId: EventIdSchema,
+});
 
 // Schema builder
 export const builder = new SchemaBuilder<{
@@ -659,7 +675,18 @@ builder.mutationType({
       args: {
         eventId: t.arg.id({ required: true }),
       },
-      resolve: async (_, { eventId }, ctx) => {
+      resolve: async (_, args, ctx) => {
+        // Validate input with Zod
+        const validation = RegisterForEventArgsSchema.safeParse(args);
+        if (!validation.success) {
+          return {
+            success: false,
+            message: validation.error.errors[0]?.message || 'Invalid input',
+          };
+        }
+
+        const { eventId: eventIdNum } = validation.data;
+
         // Check CASL permission to create event registrations
         if (!ctx.ability.can('create', 'EventRegistration')) {
           return {
@@ -674,14 +701,6 @@ builder.mutationType({
           return {
             success: false,
             message: 'You must be logged in to register for events',
-          };
-        }
-
-        const eventIdNum = parseInt(eventId);
-        if (isNaN(eventIdNum)) {
-          return {
-            success: false,
-            message: 'Invalid event ID',
           };
         }
         
@@ -859,14 +878,17 @@ builder.mutationType({
       args: {
         eventId: t.arg.id({ required: true }),
       },
-      resolve: async (_, { eventId }, ctx) => {
-        // Ensure user exists first
-        if (!ctx.user) {
+      resolve: async (_, args, ctx) => {
+        // Validate input with Zod
+        const validation = CancelEventRegistrationArgsSchema.safeParse(args);
+        if (!validation.success) {
           return {
             success: false,
-            message: 'You must be logged in to cancel registrations',
+            message: validation.error.errors[0]?.message || 'Invalid input',
           };
         }
+
+        const { eventId: eventIdNum } = validation.data;
 
         // Check CASL permission to delete event registrations
         const registrationResource = { userId: ctx.user.id.toString() };
@@ -877,11 +899,11 @@ builder.mutationType({
           };
         }
 
-        const eventIdNum = parseInt(eventId);
-        if (isNaN(eventIdNum)) {
+        // Ensure user exists first
+        if (!ctx.user) {
           return {
             success: false,
-            message: 'Invalid event ID',
+            message: 'You must be logged in to cancel registrations',
           };
         }
 
