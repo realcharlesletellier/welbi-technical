@@ -43,7 +43,7 @@ export const DATE_FORMATS = {
 export type DateInput = Date | string | number;
 
 // Utility to ensure we have a valid Date object
-function toDate(input: DateInput): Date {
+export function toDate(input: DateInput): Date {
   if (input instanceof Date) {
     return input;
   }
